@@ -22,8 +22,7 @@ import (
 type App struct {
 	config Config
 
-	httpRouter *chi.Mux
-	httpServer *http.Server
+	httpRouter chi.Router
 
 	grpcServer        *grpc.Server
 	swaggerHttpServer *http.Server
@@ -34,17 +33,25 @@ type App struct {
 }
 
 func New(config Config, logger *slog.Logger) *App {
-	return &App{
+	app := &App{
 		config: config,
 		closer: closer.New(logger),
 		logger: logger,
 	}
+
+	// @TODO: временно
+	// - выделить сервисный хттп-сервер
+	// - завести на него пробы, сваггер и т.п.
+	// - раскомментить везде initHttpRouter при проверке на необходимость публичного сервера
+	app.initHttpRouter()
+
+	return app
 }
 
 func (x *App) RegisterHttpHandler(method HttpMethod, pattern string, handler HandlerFn) {
-	if x.httpRouter == nil {
-		x.initHttpRouter()
-	}
+	//if x.httpRouter == nil {
+	//	x.initHttpRouter()
+	//}
 
 	innerHandler := func(writer http.ResponseWriter, request *http.Request) {
 		response, err := handler(request)
@@ -126,17 +133,19 @@ func (x *App) Run() {
 }
 
 func (x *App) runHttpServer() {
-	if x.httpRouter == nil {
-		return
-	}
+	//if x.httpRouter == nil {
+	//	return
+	//}
 
-	x.httpServer = &http.Server{
+	x.httpRouter.Get("/", LivenessHandler)
+
+	httpServer := &http.Server{
 		Addr:    ":8080",
 		Handler: x.httpRouter,
 	}
 
 	go func() {
-		serverErr := x.httpServer.ListenAndServe()
+		serverErr := httpServer.ListenAndServe()
 		if serverErr != nil && errors.Is(serverErr, http.ErrServerClosed) {
 			return
 		}
@@ -150,7 +159,7 @@ func (x *App) runHttpServer() {
 			ctx, cancel := context.WithTimeout(context.Background(), x.config.GetGracefulShutdownTimeoutSecond())
 			defer cancel()
 
-			if err := x.httpServer.Shutdown(ctx); err != nil {
+			if err := httpServer.Shutdown(ctx); err != nil {
 				return errors.Wrap(err, "http: failed to stop server")
 			}
 
