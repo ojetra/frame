@@ -16,16 +16,20 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/ojetra/frame/closer"
+	"github.com/ojetra/frame/health"
 	"github.com/ojetra/frame/log"
 )
 
 type App struct {
 	config Config
 
-	httpRouter chi.Router
+	healthcheck health.Checker
 
-	grpcServer        *grpc.Server
-	swaggerHttpServer *http.Server
+	httpRouter    chi.Router
+	serviceRouter chi.Router
+
+	grpcServer *grpc.Server
+	grpcMux    *runtime.ServeMux
 
 	closer *closer.Closer
 
@@ -33,25 +37,23 @@ type App struct {
 }
 
 func New(config Config, logger *slog.Logger) *App {
-	app := &App{
-		config: config,
-		closer: closer.New(logger),
-		logger: logger,
+	return &App{
+		config:        config,
+		healthcheck:   health.New(),
+		serviceRouter: chi.NewRouter(),
+		closer:        closer.New(logger),
+		logger:        logger,
 	}
+}
 
-	// @TODO: временно
-	// - выделить сервисный хттп-сервер
-	// - завести на него пробы, сваггер и т.п.
-	// - раскомментить везде initHttpRouter при проверке на необходимость публичного сервера
-	app.initHttpRouter()
-
-	return app
+func (x *App) HealthcheckAdder() health.ChecksAdder {
+	return x.healthcheck
 }
 
 func (x *App) RegisterHttpHandler(method HttpMethod, pattern string, handler HandlerFn) {
-	//if x.httpRouter == nil {
-	//	x.initHttpRouter()
-	//}
+	if x.httpRouter == nil {
+		x.initHttpRouter()
+	}
 
 	innerHandler := func(writer http.ResponseWriter, request *http.Request) {
 		response, err := handler(request)
@@ -96,27 +98,16 @@ func (x *App) RegisterHttpHandler(method HttpMethod, pattern string, handler Han
 
 func (x *App) RegisterGrpcHandlers(registrars ...GrpcRegistrar) {
 	if x.grpcServer == nil {
-		x.initGrpcServer()
+		x.grpcServer = grpc.NewServer()
 	}
 
-	grpcMux := runtime.NewServeMux()
+	x.grpcMux = runtime.NewServeMux()
 
 	for _, registrar := range registrars {
-		err := registrar.RegisterGrpcHandler(x.grpcServer, grpcMux)
+		err := registrar.RegisterGrpcHandler(x.grpcServer, x.grpcMux)
 		if err != nil {
 			panic(err.Error())
 		}
-	}
-
-	mux := http.NewServeMux()
-	mux.Handle("/", grpcMux)
-
-	fs := http.FileServer(http.Dir("./doc/swagger"))
-	mux.Handle("/swagger/", http.StripPrefix("/swagger/", fs))
-
-	x.swaggerHttpServer = &http.Server{
-		Handler: mux,
-		Addr:    ":8081",
 	}
 }
 
@@ -126,18 +117,38 @@ func (x *App) Run() {
 
 	x.runHttpServer()
 	x.runGrpcServer()
+	x.runServiceServer()
 
 	<-notifyCtx.Done()
 
 	x.closer.CloseAll()
 }
 
-func (x *App) runHttpServer() {
-	//if x.httpRouter == nil {
-	//	return
-	//}
+func (x *App) runServiceServer() {
+	x.serviceRouter.Get("/live", x.healthcheck.LivenessHandler)
 
-	x.httpRouter.Get("/", LivenessHandler)
+	x.serviceRouter.Mount("/", x.grpcMux)
+	fs := http.FileServer(http.Dir("./doc/swagger"))
+	x.serviceRouter.Mount("/swagger/", http.StripPrefix("/swagger/", fs))
+
+	serviceServer := &http.Server{
+		Addr:    ":8081",
+		Handler: x.serviceRouter,
+	}
+
+	go func() {
+		serverErr := serviceServer.ListenAndServe()
+		if serverErr != nil && errors.Is(serverErr, http.ErrServerClosed) {
+			return
+		}
+		log.FatalIfError(serverErr, "cat`t start service server")
+	}()
+}
+
+func (x *App) runHttpServer() {
+	if x.httpRouter == nil {
+		return
+	}
 
 	httpServer := &http.Server{
 		Addr:    ":8080",
@@ -181,14 +192,6 @@ func (x *App) runGrpcServer() {
 		log.FatalIfError(err, "failed to serve grpc")
 	}()
 
-	go func() {
-		err = x.swaggerHttpServer.ListenAndServe()
-		if err != nil && errors.Is(err, http.ErrServerClosed) {
-			return
-		}
-		log.FatalIfError(err, "cat`t start swagger")
-	}()
-
 	x.closer.Add(
 		func() error {
 			x.logger.Info("grpc: stopping server")
@@ -215,21 +218,6 @@ func (x *App) runGrpcServer() {
 			return nil
 		},
 	)
-
-	x.closer.Add(
-		func() error {
-			x.logger.Info("swagger: stopping server")
-
-			ctx, cancel := context.WithTimeout(context.Background(), x.config.GetGracefulShutdownTimeoutSecond())
-			defer cancel()
-
-			if err = x.swaggerHttpServer.Shutdown(ctx); err != nil {
-				return errors.Wrap(err, "swagger: failed to stop server")
-			}
-
-			return nil
-		},
-	)
 }
 
 func (x *App) initHttpRouter() {
@@ -239,8 +227,4 @@ func (x *App) initHttpRouter() {
 	router.Use(middleware.RequestID)
 
 	x.httpRouter = router
-}
-
-func (x *App) initGrpcServer() {
-	x.grpcServer = grpc.NewServer()
 }
