@@ -21,7 +21,8 @@ import (
 )
 
 type App struct {
-	config Config
+	config      Config
+	shutdownCtx context.Context
 
 	healthcheck health.Checker
 
@@ -37,13 +38,28 @@ type App struct {
 }
 
 func New(config Config, logger *slog.Logger) *App {
-	return &App{
+	ctx := context.Background()
+	shutdownCtx, cancel := context.WithCancel(ctx)
+
+	app := &App{
 		config:        config,
+		shutdownCtx:   shutdownCtx,
 		healthcheck:   health.New(),
 		serviceRouter: chi.NewRouter(),
 		closer:        closer.New(logger),
 		logger:        logger,
 	}
+
+	app.closer.Add(func() error {
+		cancel()
+		return nil
+	})
+
+	return app
+}
+
+func (x *App) GetShutdownContext() context.Context {
+	return x.shutdownCtx
 }
 
 func (x *App) HealthcheckAdder() health.ChecksAdder {
