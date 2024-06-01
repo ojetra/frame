@@ -86,13 +86,21 @@ func (x *App) RegisterHttpHandler(method HttpMethod, pattern string, handler Han
 			return
 		}
 
+		for _, addEntry := range response.Headers.GetAddEntrySlice() {
+			writer.Header().Add(addEntry.name, addEntry.value)
+		}
+
+		for name, value := range response.Headers.GetSetEntryMap() {
+			writer.Header().Set(name, value)
+		}
+
+		writer.WriteHeader(http.StatusOK)
+
 		_, err = writer.Write(response.Data)
 		if err != nil {
 			setErrorResponse(err, http.StatusInternalServerError, writer, request)
 			return
 		}
-
-		writer.WriteHeader(http.StatusOK)
 	}
 
 	switch method {
@@ -141,7 +149,7 @@ func (x *App) Run() {
 }
 
 func (x *App) runServiceServer() {
-	x.serviceRouter.Get("/live", x.healthcheck.LivenessHandler)
+	//x.serviceRouter.Get("/live", x.healthcheck.LivenessHandler)
 
 	x.serviceRouter.Mount("/", x.grpcMux)
 	fs := http.FileServer(http.Dir("./doc/swagger"))
@@ -163,8 +171,12 @@ func (x *App) runServiceServer() {
 
 func (x *App) runHttpServer() {
 	if x.httpRouter == nil {
-		return
+		// @TODO: временно: определиться с портами - девопсы шаманят с портами на http и grpc
+		x.initHttpRouter()
+		//return
 	}
+
+	x.httpRouter.Get("/health", x.healthcheck.LivenessHandler)
 
 	httpServer := &http.Server{
 		Addr:    ":8080",
